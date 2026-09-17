@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — Resume provenance correction
+
+- Preserve accepted ancestor-run outputs when an unchanged reused task becomes stale in a later resume. Resolve owned paths, including in-project symlink aliases and globs, against the full preserved run ancestry. Reject writes into unrelated runs before creating the resumed run.
+- Added three normal-CLI regression tests, a standalone before/after reproducer, and explicit cross-run coordination limitations. See [the verification record](docs/verification/resume-provenance-2026-09-17/README.md).
+
 ## Unreleased — Codex run coordination improvements
 
 - Added a first-standby native spawn preflight, missing-thread diagnostics that stop per-role retries, and sequential fallback guidance that preserves persistence preferences and keeps native-only failures explicit ([#1](https://github.com/revfactory/codex-harness/issues/1)).

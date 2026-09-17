@@ -426,6 +426,42 @@ def update_agent(project: Path, run_id: str, agent_id: str, state: str, evidence
     return {"run_id": run_id, "agent_id": agent_id, **agent}
 
 
+def _resume_ancestors(project: Path, plan: dict) -> set[Path]:
+    """Include every preserved generation, not only the immediately prior run."""
+    ancestors = set()
+    while True:
+        directory = run_path(project, plan["run_id"])
+        if directory in ancestors:
+            raise ValueError("Run ancestry contains a cycle.")
+        ancestors.add(directory)
+        previous = plan.get("previous_run_id")
+        if previous is None:
+            return ancestors
+        plan = load_json(safe_path(run_path(project, previous) / "plan.json"))
+        if not isinstance(plan, dict) or plan.get("run_id") != previous or plan.get("project_root") != str(project):
+            raise ValueError("Ancestor run ID or project root does not match its stored plan.")
+
+
+def _resumed_ownership(project: Path, path: str, ancestors: set[Path], new_directory: Path) -> str:
+    """Move ancestor output ownership, including globs and symlink aliases."""
+    prefix = ownership_prefix(path)
+    resolved = project_path(project, prefix or ".", allow_missing=True)
+    runs_directory = new_directory.parent
+    if resolved == runs_directory or runs_directory.is_relative_to(resolved):
+        raise ValueError(f"Ownership includes previous run records: {path}. Assign narrower explicit output paths before resume.")
+    if not resolved.is_relative_to(runs_directory):
+        return path
+    source_directory = runs_directory / resolved.relative_to(runs_directory).parts[0]
+    if source_directory == new_directory:
+        return path
+    if source_directory not in ancestors:
+        raise ValueError(f"Ownership includes unrelated run records: {path}. Assign output paths in the new run before resume.")
+    normalized = str(PurePosixPath(path))
+    suffix = normalized[len(prefix):] + ("/" if path.endswith("/") else "")
+    destination = new_directory / resolved.relative_to(source_directory)
+    return destination.relative_to(project).as_posix() + suffix
+
+
 def resume_run(project: Path, old_id: str, new_id: str, plan_file: Path | None = None) -> dict:
     project = _project(project)
     old_directory, new_directory = run_path(project, old_id), run_path(project, new_id)
@@ -439,6 +475,7 @@ def resume_run(project: Path, old_id: str, new_id: str, plan_file: Path | None =
             raise ValueError("Cannot resume while old native agents are running or stop_requested; confirm they stopped first.")
         source = old if plan_file is None else load_json(Path(plan_file))
         plan = _prepare(project, source, new_id, previous=old_id)
+        ancestors = _resume_ancestors(project, old)
         previous_tasks = {task["id"]: task for task in old["tasks"]}
         reused, results, invalidated = set(), {}, {}
         for task in _ordered(plan["tasks"]):
@@ -458,18 +495,8 @@ def resume_run(project: Path, old_id: str, new_id: str, plan_file: Path | None =
             if any(identifier not in reused for identifier in task["dependencies"]):
                 reason.append("A dependency must be rerun.")
             if reason:
-                old_prefix = old_directory.relative_to(project).as_posix()
-                new_prefix = new_directory.relative_to(project).as_posix()
                 # A retried task must write into its new run, preserving all old records.
-                mapped = []
-                for path in task["ownership"]:
-                    normalized = str(PurePosixPath(path))
-                    if normalized == old_prefix or normalized.startswith(old_prefix + "/"):
-                        mapped.append(new_prefix + normalized[len(old_prefix):] + ("/" if path.endswith("/") else ""))
-                    elif _project_overlap(project, path, old_prefix):
-                        raise ValueError(f"Ownership includes previous run records: {path}. Assign narrower explicit output paths before resume.")
-                    else:
-                        mapped.append(path)
+                mapped = [_resumed_ownership(project, path, ancestors, new_directory) for path in task["ownership"]]
                 task["ownership"] = mapped
                 for path in task["inputs"]:
                     if any(_project_overlap(project, path, owned) for owned in mapped):
